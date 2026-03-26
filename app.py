@@ -11,41 +11,21 @@ import sqlite3
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 
-# --- CONFIGURATION & PATHS ---
+# --- 1. CONFIGURATION & PERMANENT DATA ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# FIX: Added exist_ok=True to prevent the FileExistsError on Render
-DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True) 
+# Since you are on Render Free Tier (No Disk), hardcode your accounts here 
+# to ensure they are always present after a restart:
+DEFAULT_ACCOUNTS = [
+    # {"name": "Example Site", "email": "user@example.com", "password": "password123", "type": "Internal", "threshold": 5},
+]
 
-DB_FILE = os.path.join(DATA_DIR, "accounts_db.json")
-DB_STATS = os.path.join(DATA_DIR, "surveillance_stats.db")
+# Temporary DB paths (will reset on Render restart/deploy)
+DB_FILE = "accounts_db.json"
+DB_STATS = "surveillance_stats.db"
 ALARM_URL = "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
 
-# --- UI SETUP ---
-st.set_page_config(page_title="JioSecure.ai", layout="wide")
-
-# --- AUTHENTICATION LOGIC ---
-if "password_correct" not in st.session_state:
-    st.session_state["password_correct"] = False
-
-def check_password():
-    if not st.session_state["password_correct"]:
-        st.sidebar.markdown("### 🔐 Authentication")
-        pwd = st.sidebar.text_input("Master Password", type="password")
-        if st.sidebar.button("Unlock Dashboard"):
-            # Ensure MASTER_PASSWORD is set in Render Env Vars
-            if pwd == os.getenv("MASTER_PASSWORD", "admin123"):
-                st.session_state["password_correct"] = True
-                st.rerun()
-            else:
-                st.sidebar.error("❌ Invalid Password")
-        
-        st.warning("Please login in the sidebar to manage accounts and view data.")
-        return False
-    return True
-
-# --- DATABASE & CORE FUNCTIONS ---
+# --- 2. DATABASE INITIALIZATION ---
 def init_stats_db():
     conn = sqlite3.connect(DB_STATS)
     conn.execute('''CREATE TABLE IF NOT EXISTS daily_stats
@@ -71,18 +51,24 @@ def log_daily_stats(df):
     conn.close()
 
 def load_accounts():
+    accounts = []
+    # Load from file if it exists (for current session)
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f:
-                data = json.load(f)
-                return data
-        except: return []
-    return []
+                accounts = json.load(f)
+        except: pass
+    
+    # Merge with hardcoded defaults if not already present
+    existing_emails = [a['email'] for a in accounts]
+    for default in DEFAULT_ACCOUNTS:
+        if default['email'] not in existing_emails:
+            accounts.append(default)
+    return accounts
 
 def save_accounts(accounts):
-    clean = [{"name": a["name"], "email": a["email"], "password": a["password"], 
-              "type": a["type"], "threshold": a.get("threshold", 10)} for a in accounts]
-    with open(DB_FILE, "w") as f: json.dump(clean, f)
+    with open(DB_FILE, "w") as f:
+        json.dump(accounts, f)
 
 def login_get_token(email, password):
     url = "https://api.cloud.smartmonitoring.jio.com/auth/oauth/token"
@@ -94,73 +80,123 @@ def login_get_token(email, password):
         return r.json().get('access_token')
     except: return None
 
-# --- MAIN APP FLOW ---
+# --- 3. UI SETUP ---
+st.set_page_config(page_title="JioSecure.ai", layout="wide")
 init_stats_db()
 
-if check_password():
-    # AUTO-REFRESH: Keep this inside the IF block
-    st_autorefresh(interval=120 * 1000, key="data_refresh_pulse")
+# Auto-refresh every 2 minutes
+st_autorefresh(interval=120 * 1000, key="global_refresh")
 
-    st.markdown("""
-        <style>
-        .block-container { padding-top: 1rem; max-width: 98%; }
-        thead tr th:first-child, tbody tr th:first-child { display: none; }
-        table { width: 100% !important; table-layout: fixed !important; }
-        </style>
-    """, unsafe_allow_html=True)
+st.markdown("""
+    <style>
+    .block-container { padding-top: 1rem; max-width: 98%; }
+    thead tr th:first-child, tbody tr th:first-child { display: none; }
+    table { width: 100% !important; table-layout: fixed !important; }
+    th:nth-child(2), td:nth-child(2) { width: 5%; } 
+    th:nth-child(3), td:nth-child(3) { width: 15%; }
+    th:nth-child(4), td:nth-child(4) { width: 40%; }
+    th:nth-child(5), td:nth-child(5) { width: 8%; } 
+    th:nth-child(6), td:nth-child(6) { width: 8%; } 
+    th:nth-child(7), td:nth-child(7) { width: 8%; } 
+    th:nth-child(8), td:nth-child(8) { width: 16%; }
+    </style>
+""", unsafe_allow_html=True)
 
-    if 'accounts' not in st.session_state:
-        st.session_state.accounts = load_accounts()
-        for acc in st.session_state.accounts: acc["token"] = None
+# --- 4. AUTHENTICATION & SESSION ---
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
 
-    # --- SIDEBAR MANAGEMENT ---
-    st.sidebar.header("⚙️ Account Control")
-    
-    with st.sidebar.expander("➕ Add Account"):
-        an = st.text_input("Name")
-        ae = st.text_input("Email")
-        ap = st.text_input("Password", type="password")
-        at = st.selectbox("Group", ["Internal", "POC"])
-        atr = st.number_input("Threshold %", value=(5 if at=="Internal" else 10))
-        if st.button("Save"):
-            st.session_state.accounts.append({"name": an, "email": ae, "password": ap, "type": at, "threshold": atr, "token": None})
+if not st.session_state.authenticated:
+    st.title("🔐 JioSecure.ai Login")
+    pwd = st.text_input("Enter Master Password", type="password")
+    if st.button("Login"):
+        if pwd == os.getenv("MASTER_PASSWORD", "admin123"):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect Password")
+    st.stop() # Prevents rest of the code from running until logged in
+
+if 'accounts' not in st.session_state:
+    st.session_state.accounts = load_accounts()
+    for acc in st.session_state.accounts: acc["token"] = None
+
+# --- 5. SIDEBAR: RESTORED FULL FEATURES ---
+st.sidebar.header("⚙️ Account Management")
+
+with st.sidebar.expander("➕ Add New Account"):
+    add_n = st.text_input("Name", key="an")
+    add_e = st.text_input("Email", key="ae")
+    add_p = st.text_input("Password", type="password", key="ap")
+    add_t = st.selectbox("Group", ["Internal", "POC"], key="at")
+    def_val = 5 if add_t == "Internal" else 10
+    add_tr = st.number_input("Offline Threshold %", value=def_val, key="at_tr")
+    if st.button("Save New Account"):
+        st.session_state.accounts.append({"name": add_n, "email": add_e, "password": add_p, "type": add_t, "threshold": add_tr, "token": None})
+        save_accounts(st.session_state.accounts)
+        st.rerun()
+
+with st.sidebar.expander("🔄 Update Account"):
+    if st.session_state.accounts:
+        u_email = st.selectbox("Select Account", [a['email'] for a in st.session_state.accounts], key="u_sel")
+        target = next(a for a in st.session_state.accounts if a['email'] == u_email)
+        un = st.text_input("Edit Name", value=target.get('name', ''), key="un")
+        up = st.text_input("Edit Password", value=target.get('password', ''), type="password", key="up")
+        ut = st.selectbox("Edit Group", ["Internal", "POC"], index=0 if target.get('type')=="Internal" else 1, key="ut")
+        utr = st.number_input("Edit Threshold %", value=target.get('threshold', 5), key="utr")
+        if st.button("Commit Update"):
+            target.update({"name": un, "password": up, "type": ut, "threshold": utr, "token": None})
             save_accounts(st.session_state.accounts)
             st.rerun()
 
-    with st.sidebar.expander("🗑️ Delete Account"):
-        if st.session_state.accounts:
-            de = st.selectbox("Select to Remove", [a['email'] for a in st.session_state.accounts])
-            if st.button("Confirm Delete"):
-                st.session_state.accounts = [a for a in st.session_state.accounts if a['email'] != de]
-                save_accounts(st.session_state.accounts)
-                st.rerun()
+with st.sidebar.expander("🗑️ Delete Account"):
+    if st.session_state.accounts:
+        de = st.selectbox("Remove Account", [a['email'] for a in st.session_state.accounts], key="d_sel")
+        if st.button("Confirm Delete"):
+            st.session_state.accounts = [a for a in st.session_state.accounts if a['email'] != de]
+            save_accounts(st.session_state.accounts)
+            st.rerun()
 
-    if st.sidebar.button("🔴 Logout"):
-        st.session_state["password_correct"] = False
-        st.rerun()
+st.sidebar.markdown("---")
+view_history = st.sidebar.toggle("📊 View History Insights", value=False)
+mute_alarm = st.sidebar.toggle("🔇 Mute Audio Alert", value=False)
+if st.sidebar.button("Logout"):
+    st.session_state.authenticated = False
+    st.rerun()
 
-    # --- DASHBOARD HEADER ---
-    h1, h2 = st.columns([3, 1])
-    with h1:
-        st.title("🇮🇳 JioSecure.ai Dashboard")
-    with h2:
-        components.html("""
-            <div style="font-family: monospace; font-size: 18px; font-weight: bold; border: 1px solid #ccc; padding: 10px; text-align: center; border-radius: 5px;">
-                IST: <span id="clock">--:--:--</span>
-            </div>
-            <script>
-                setInterval(() => {
-                    document.getElementById('clock').innerHTML = new Date().toLocaleTimeString('en-GB', {timeZone:'Asia/Kolkata', hour12:false});
-                }, 1000);
-            </script>
-        """, height=70)
+# --- 6. HEADER & CLOCK ---
+h1, h2, h3 = st.columns([2.5, 1, 1])
+with h1:
+    st.markdown("""<div style="display: flex; align-items: center; gap: 12px; margin-top: 8px;">
+        <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEiX6TH3MXo-zzVneKFhf0bTdzzLuz_fWp6Ls4F6Z43WP1o7KnFuk3y2oYc3PcKZ9D5ybFksoxL84ZMfiOycWdOJ9DiwTlayyHqriSHba3oand3sqRsqtItMAdcwfrctHVn_p_xyqUbDx9s/s1600/India_flag_with_emblem.gif" width="45">
+        <h3 style="margin: 0;">Surveillance Dashboard</h3></div>""", unsafe_allow_html=True)
 
-    # --- MAIN DATA FETCHING ---
+with h2:
+    components.html("""
+    <div style="font-family: monospace; font-size: 16px; font-weight: bold; border: 1px solid #ccc; border-radius: 4px; text-align: center; background: white; line-height:38px; margin-top: 20px;">
+        🇮🇳 <span id="clock">--:--:--</span>
+    </div>
+    <script>
+        function u(){ document.getElementById('clock').innerHTML = new Date().toLocaleTimeString('en-GB', {timeZone:'Asia/Kolkata', hour12:false}); }
+        setInterval(u, 1000); u();
+    </script>
+    """, height=55)
+
+st.markdown("<hr style='margin: 5px 0 15px 0;'>", unsafe_allow_html=True)
+
+# --- 7. MAIN LOGIC SEPARATION ---
+if view_history:
+    st.subheader("📊 History Insights")
+    conn = sqlite3.connect(DB_STATS)
+    h_df = pd.read_sql_query("SELECT * FROM daily_stats ORDER BY date DESC", conn)
+    st.dataframe(h_df, use_container_width=True, hide_index=True)
+    conn.close()
+else:
     results = []
     trigger_alarm = False
     
     if not st.session_state.accounts:
-        st.info("No accounts linked. Use the sidebar to add accounts.")
+        st.info("Add accounts in the sidebar to begin.")
     else:
         for acc in st.session_state.accounts:
             if not acc.get('token'): 
@@ -168,31 +204,33 @@ if check_password():
             
             try:
                 r = requests.post("https://api.cloud.jiosurveillance.com/dashboards/main?op=GET", 
-                                headers={'Authorization': f'Bearer {acc["token"]}'}, json={}, verify=False, timeout=10)
+                                 headers={'Authorization': f'Bearer {acc["token"]}'}, json={}, verify=False, timeout=12)
                 if r.status_code == 200:
                     s = r.json()["result"]["sections"]["camera_summary"]
                     tot, off = s['total'], s['offline']
                     p = (off/tot*100) if tot > 0 else 0
                     limit = acc.get('threshold', 5)
                     
-                    flag = "🟢 0.0%" if off == 0 else f"{'🚩 ' if p > limit else ''}{p:.1f}%"
-                    if acc['type'] == "Internal" and p > 5: trigger_alarm = True
-                    
-                    results.append({"Name": acc['name'], "Account": acc['email'], "Total": tot, "Online": tot-off, "Offline": off, "Offline %": flag, "Type": acc['type']})
-                else:
-                    acc['token'] = None
+                    flag_str = "🟢 0.0%" if off == 0 else f"{'🚩 ' if p > limit else ''}{p:.1f}%"
+                    if not mute_alarm and acc['type'] == "Internal" and p > 5:
+                        trigger_alarm = True
+
+                    results.append({"Name": acc['name'], "Account": acc['email'], "Total": tot, "Online": tot-off, "Offline": off, "Offline %": flag_str, "Type": acc['type']})
+                else: acc['token'] = None
             except: pass
 
         if trigger_alarm:
             st.markdown(f'<audio autoplay src="{ALARM_URL}" type="audio/ogg"></audio>', unsafe_allow_html=True)
 
         if results:
-            df = pd.DataFrame(results)
-            log_daily_stats(df)
-            for group in ["Internal", "POC"]:
-                st.subheader(f"{group} Sites")
-                sub_df = df[df['Type'] == group].drop(columns=['Type'])
-                if not sub_df.empty:
-                    st.table(sub_df)
+            main_df = pd.DataFrame(results)
+            log_daily_stats(main_df)
             
-            st.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')}")
+            for g in ["Internal", "POC"]:
+                st.subheader(f"{'🏢' if g=='Internal' else '🧪'} {g} Accounts")
+                sub = main_df[main_df['Type'] == g].drop(columns=['Type']).copy()
+                if not sub.empty:
+                    sub.insert(0, 'S/N', range(1, len(sub) + 1))
+                    st.table(sub.astype(str))
+            
+            st.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')} (Auto-refresh every 2m)")
