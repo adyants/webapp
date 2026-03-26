@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import json
-import ssl
 import os
 import pandas as pd
 from requests.adapters import HTTPAdapter
@@ -11,12 +10,16 @@ from datetime import datetime
 import time
 import sqlite3
 import streamlit.components.v1 as components
+# You will need to add "streamlit-autorefresh" to your requirements.txt
+from streamlit_autorefresh import st_autorefresh
 
 # --- INITIALIZATION & DATABASE ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# For Render, we use the local directory, but remember: 
+# Data is lost on every "Deploy" or "Restart" unless you attach a Render Blueprint Disk.
 DB_FILE = "accounts_db.json"
 DB_STATS = "surveillance_stats.db"
-# Notification sound URL (Standard Google Alarm Beep)
 ALARM_URL = "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
 
 def init_stats_db():
@@ -51,7 +54,6 @@ def load_accounts():
             for acc in data:
                 acc.setdefault('name', 'N/A')
                 acc.setdefault('type', 'Internal')
-                # Default threshold: 5% for Internal, 10% for POC
                 if 'threshold' not in acc:
                     acc['threshold'] = 5 if acc['type'] == "Internal" else 10
             return data
@@ -80,6 +82,9 @@ def login_get_token(email, password):
 st.set_page_config(page_title="JioSecure.ai", layout="wide")
 init_stats_db()
 
+# AUTO-REFRESH EVERY 120 SECONDS (2 Minutes)
+count = st_autorefresh(interval=120 * 1000, key="datarefresh")
+
 st.markdown("""
     <style>
     .block-container { padding-top: 1rem; max-width: 98%; }
@@ -107,7 +112,6 @@ with st.sidebar.expander("➕ Add New Account"):
     add_e = st.text_input("Email", key="ae")
     add_p = st.text_input("Password", type="password", key="ap")
     add_t = st.selectbox("Group", ["Internal", "POC"], key="at")
-    # Dynamic default based on group selection
     def_val = 5 if add_t == "Internal" else 10
     add_tr = st.number_input("Offline Threshold %", value=def_val, key="at_tr")
     
@@ -167,69 +171,62 @@ with h2:
 
 st.markdown("<hr style='margin: 5px 0 15px 0;'>", unsafe_allow_html=True)
 
-# --- LOGIC SEPARATION ---
+# --- DISPLAY LOGIC ---
 if view_history:
     st.subheader("📊 History Insights")
     conn = sqlite3.connect(DB_STATS)
     h_df = pd.read_sql_query("SELECT * FROM daily_stats ORDER BY date DESC", conn)
-    st.dataframe(h_df, width="stretch", hide_index=True)
+    st.dataframe(h_df, use_container_width=True, hide_index=True)
     conn.close()
 else:
-    body = st.empty()
-    alarm_placeholder = st.empty() # Placeholder for the audio HTML
-
-    while True:
-        with body.container():
-            if not st.session_state.accounts:
-                st.info("Add accounts in the sidebar to begin.")
-            else:
-                results = []
-                trigger_alarm = False
-                
-                for acc in st.session_state.accounts:
-                    if not acc.get('token'): acc['token'] = login_get_token(acc['email'], acc['password'])
-                    try:
-                        r = get_session().post("https://api.cloud.jiosurveillance.com/dashboards/main?op=GET", 
-                                             headers={'Authorization': f'Bearer {acc["token"]}'}, json={}, verify=False, timeout=15)
-                        if r.status_code == 200:
-                            s = r.json()["result"]["sections"]["camera_summary"]
-                            tot, off = s['total'], s['offline']
-                            
-                            p = (off/tot*100) if tot > 0 else 0
-                            limit = acc.get('threshold', 5 if acc['type'] == "Internal" else 10)
-                            
-                            # FLAG LOGIC
-                            if off == 0: 
-                                flag_str = "🟢 0.0%"
-                            else:
-                                flag_str = f"{'🚩 ' if p > limit else ''}{p:.1f}%"
-                            
-                            # CRITICAL ALERT LOGIC (Internal > 5%)
-                            if not mute_alarm and acc['type'] == "Internal" and p > 5:
-                                trigger_alarm = True
-
-                            results.append({"Name": acc['name'], "Account": acc['email'], "Total": tot, "Online": tot-off, "Offline": off, "Offline %": flag_str, "Type": acc['type']})
-                        else: acc['token'] = None
-                    except: pass
-
-                # Handle Sound Alert
-                if trigger_alarm:
-                    alarm_placeholder.markdown(f'<audio autoplay src="{ALARM_URL}" type="audio/ogg"></audio>', unsafe_allow_html=True)
-                else:
-                    alarm_placeholder.empty()
-
-                if results:
-                    main_df = pd.DataFrame(results)
-                    log_daily_stats(main_df)
-                    
-                    for g in ["Internal", "POC"]:
-                        st.subheader(f"{'🏢' if g=='Internal' else '🧪'} {g} Accounts")
-                        sub = main_df[main_df['Type'] == g].drop(columns=['Type']).copy()
-                        if not sub.empty:
-                            sub.insert(0, 'S/N', range(1, len(sub) + 1))
-                            st.table(sub.astype(str))
-                    
-                    st.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')}")
+    alarm_placeholder = st.empty()
+    
+    if not st.session_state.accounts:
+        st.info("Add accounts in the sidebar to begin.")
+    else:
+        results = []
+        trigger_alarm = False
         
-        time.sleep(120)
-        st.rerun()
+        for acc in st.session_state.accounts:
+            if not acc.get('token'): 
+                acc['token'] = login_get_token(acc['email'], acc['password'])
+            
+            try:
+                r = get_session().post("https://api.cloud.jiosurveillance.com/dashboards/main?op=GET", 
+                                     headers={'Authorization': f'Bearer {acc["token"]}'}, json={}, verify=False, timeout=15)
+                if r.status_code == 200:
+                    s = r.json()["result"]["sections"]["camera_summary"]
+                    tot, off = s['total'], s['offline']
+                    
+                    p = (off/tot*100) if tot > 0 else 0
+                    limit = acc.get('threshold', 5 if acc['type'] == "Internal" else 10)
+                    
+                    if off == 0: 
+                        flag_str = "🟢 0.0%"
+                    else:
+                        flag_str = f"{'🚩 ' if p > limit else ''}{p:.1f}%"
+                    
+                    if not mute_alarm and acc['type'] == "Internal" and p > 5:
+                        trigger_alarm = True
+
+                    results.append({"Name": acc['name'], "Account": acc['email'], "Total": tot, "Online": tot-off, "Offline": off, "Offline %": flag_str, "Type": acc['type']})
+                else: 
+                    acc['token'] = None
+            except: 
+                pass
+
+        if trigger_alarm:
+            alarm_placeholder.markdown(f'<audio autoplay src="{ALARM_URL}" type="audio/ogg"></audio>', unsafe_allow_html=True)
+
+        if results:
+            main_df = pd.DataFrame(results)
+            log_daily_stats(main_df)
+            
+            for g in ["Internal", "POC"]:
+                st.subheader(f"{'🏢' if g=='Internal' else '🧪'} {g} Accounts")
+                sub = main_df[main_df['Type'] == g].drop(columns=['Type']).copy()
+                if not sub.empty:
+                    sub.insert(0, 'S/N', range(1, len(sub) + 1))
+                    st.table(sub.astype(str))
+            
+            st.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')} (Auto-refresh every 2m)")
