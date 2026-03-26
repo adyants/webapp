@@ -9,6 +9,7 @@ from urllib3.util.retry import Retry
 import urllib3
 from datetime import datetime
 import time
+import pytz
 import sqlite3
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
@@ -248,4 +249,6 @@ else:
                     sub.insert(0, 'S/N', range(1, len(sub) + 1))
                     st.table(sub.astype(str))
             
-            st.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')}")
+            # --- IST SYNC TIME FIX ---
+        ist = pytz.timezone('Asia/Kolkata')
+        st.caption(f"Last Sync: {datetime.now(ist).strftime('%H:%M:%S')} (IST)")
