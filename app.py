@@ -26,7 +26,7 @@ os.makedirs(DATA_DIR, exist_ok=True) # Fixed the crash error
 
 DB_FILE = os.path.join(DATA_DIR, "accounts_db.json")
 DB_STATS = os.path.join(DATA_DIR, "surveillance_stats.db")
-ALARM_URL = "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
+ALARM_URL = "https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg"
 
 def init_stats_db():
     conn = sqlite3.connect(DB_STATS)
